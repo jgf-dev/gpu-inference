@@ -11,6 +11,8 @@ dev = [
     "pytest>=8.3,<9",
     "pyright>=1.1.400,<2",
     "ruff>=0.9,<1",
+    "modal>=1.6.3",
+    "beam-client>=0.2.239",
 ]
 
 [tool.pytest.ini_options]
