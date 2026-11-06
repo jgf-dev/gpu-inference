@@ -1,0 +1,18 @@
+{
+  "cell": "argv",
+  "cell_type": "domain",
+  "sealed_at_utc": "2026-11-06T19:49:24.796358+00:00",
+  "metrics": {
+    "loc": 22,
+    "estimated_tokens": 186
+  },
+  "upstream_files": [
+    "contracts/argv_contract.py",
+    "contracts/settings_contract.py",
+    "specs/argv.spec.md",
+    "tests/contract/test_argv.py",
+    "tests/property/test_argv.py"
+  ],
+  "upstream_sha256": "5c5034ef4da98e071abb340d3a30e5dabc18f2fefefff88e12290fd22dd6f1a8",
+  "dist_sha256": "46550b3f5fa4aec78494ef9153e1404cd6f73f2eaea1b2caac768a99fe1af86e"
+}
