@@ -1,0 +1,17 @@
+{
+  "cell": "settings",
+  "cell_type": "domain",
+  "sealed_at_utc": "2026-11-06T19:48:28.016216+00:00",
+  "metrics": {
+    "loc": 28,
+    "estimated_tokens": 303
+  },
+  "upstream_files": [
+    "contracts/settings_contract.py",
+    "specs/settings.spec.md",
+    "tests/contract/test_settings.py",
+    "tests/property/test_settings.py"
+  ],
+  "upstream_sha256": "9801a595329e1d4d9bce6a19b84778981140eed6cfa9f5562dc6503f5a73defd",
+  "dist_sha256": "b5111c41144e3f34bcc9c8d5303033aa2e55645759643f77e9ab7760973c89d0"
+}

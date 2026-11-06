@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# __pycache__ inside dist/ is not a cell and breaks verify.
+find dist -type d -name __pycache__ -prune -exec rm -rf {} +
+
+python3 scripts/regen_guard.py verify
+
+if git diff --cached --name-only | grep -qE '^scratch/'; then
+  echo "ERROR: Attempted to commit files in scratch/. Extract findings to specs/ and delete scratch/ files." >&2
+  exit 1
+fi
