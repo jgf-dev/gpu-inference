@@ -1,0 +1,23 @@
+services:
+  comfyui:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8188:8188"
+    environment:
+      GCS_BUCKET: ${GCS_BUCKET:-local}
+      COMFYUI_OUTPUT_DIR: /outputs
+    volumes:
+      - ../models:/models:ro
+      - comfyui-outputs:/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  comfyui-outputs:
