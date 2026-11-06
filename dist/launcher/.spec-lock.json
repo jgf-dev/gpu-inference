@@ -1,0 +1,18 @@
+{
+  "cell": "launcher",
+  "cell_type": "adapter",
+  "sealed_at_utc": "2026-11-06T19:50:18.722973+00:00",
+  "metrics": {
+    "loc": 13,
+    "estimated_tokens": 110
+  },
+  "upstream_files": [
+    "contracts/argv_contract.py",
+    "contracts/launcher_contract.py",
+    "contracts/settings_contract.py",
+    "specs/launcher.spec.md",
+    "tests/contract/test_launcher.py"
+  ],
+  "upstream_sha256": "af1e2ab5debb622d700475e2f6b1c42595abc696136d7f455ecb948b836219a1",
+  "dist_sha256": "5cc87b52ca405816e54d9125bedb0b0941f35dc9c742b76ccdcceec335e9a6bf"
+}
