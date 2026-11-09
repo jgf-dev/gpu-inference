@@ -35,6 +35,7 @@ outputs = modal.Volume.from_name("comfyui-outputs", create_if_missing=True)
 @app.function(
     image=image,
     gpu=plan.settings.modal_gpu,
+    env={"GCS_BUCKET": bucket},
     volumes={
         str(plan.settings.models_mount): gcs_mount,
         "/outputs": outputs,
