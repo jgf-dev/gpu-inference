@@ -23,6 +23,9 @@ slower on FUSE and can deadlock under concurrent page faults.
   runtime will never start and every request will fail with argparse errors.
 - `GCS_BUCKET` must exist in the container environment, not just the shell
   running `modal deploy`. `deploy/modal_app.py` passes it via `env={...}`.
+- Python bytecode under `contracts/` or `dist/` is treated as an unsealed cell
+  by `regen_guard.py`. Always clean both before `verify`/`stale`:
+  `find dist contracts -type d -name __pycache__ -prune -exec rm -rf {} +`.
 
 ## Bucket layout
 
@@ -38,7 +41,7 @@ gs://<bucket>/checkpoints/  clip/  clip_vision/  controlnet/
 uv sync --frozen
 uv run pyright contracts/ dist/
 uv run pytest
-find dist -type d -name __pycache__ -prune -exec rm -rf {} +
+find dist contracts -type d -name __pycache__ -prune -exec rm -rf {} +
 python3 scripts/regen_guard.py verify
 python3 scripts/regen_guard.py stale
 uv run python -m dist.main --dry-run --once

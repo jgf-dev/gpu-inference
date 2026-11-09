@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# __pycache__ inside dist/ is not a cell and breaks verify.
-find dist -type d -name __pycache__ -prune -exec rm -rf {} +
+# __pycache__ inside dist/ or contracts/ is not a cell and breaks verify.
+find dist contracts -type d -name __pycache__ -prune -exec rm -rf {} +
 
 python3 scripts/regen_guard.py verify
 
