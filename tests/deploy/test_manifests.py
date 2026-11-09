@@ -16,6 +16,10 @@ def test_modal_mounts_gcs_read_only_and_scales_to_zero():
 
     functions = calls(tree, "function")
     assert len(functions) == 1
+    env = keyword(functions[0], "env")
+    assert isinstance(env, ast.Dict)
+    env_keys = [k.value for k in env.keys if isinstance(k, ast.Constant)]
+    assert "GCS_BUCKET" in env_keys
     min_containers = keyword(functions[0], "min_containers")
     assert isinstance(min_containers, ast.Constant)
     assert min_containers.value == 0

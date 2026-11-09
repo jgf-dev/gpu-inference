@@ -14,6 +14,16 @@ three sealed cells (`settings`, `argv`, `launcher`) plus a composition root
 `--disable-mmap` is mandatory: ComfyUI's default safetensors mmap is 30–50x
 slower on FUSE and can deadlock under concurrent page faults.
 
+## Modal-specific notes
+
+- Modal appends its own container command to the image `ENTRYPOINT` (for
+  example `python -u ... -m modal._container_entrypoint`). `deploy/entrypoint.sh`
+  detects a Python executable as the first argument and execs it unchanged.
+  Do not simplify that script to a bare `exec python -m dist.main`: Modal's
+  runtime will never start and every request will fail with argparse errors.
+- `GCS_BUCKET` must exist in the container environment, not just the shell
+  running `modal deploy`. `deploy/modal_app.py` passes it via `env={...}`.
+
 ## Bucket layout
 
 ```
