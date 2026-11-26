@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import argparse
 import ast
-from collections import deque
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import stat
 import sys
+from collections import deque
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TypedDict, cast
 
 CELL_BUDGETS = {
     "domain": {"max_loc": 350, "max_tokens": 4500},
@@ -36,6 +37,69 @@ CELL_TYPE_PRIORITY = {"domain": 0, "adapter": 1, "entrypoint": 2}
 MAX_INBOUND_CONTEXT_TOKENS = 8000
 CODE_EXTS = {".py", ".ts", ".tsx", ".js", ".mts"}
 TS_EXTS = {".ts", ".tsx", ".js", ".mts"}
+VALID_CELL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+
+
+class CellStatus(TypedDict):
+    cell: str
+    cell_type: str
+    stale: bool
+    reasons: list[str]
+    depends_on: list[str]
+    upstream_files: list[str]
+    changed_drivers: list[str]
+    commands: list[str]
+
+
+class StalenessReport(TypedDict):
+    stale_count: int
+    has_cycles: bool
+    cycle_cells: list[str]
+    regeneration_order: list[str]
+    full_dag_order: list[str]
+    cells: list[CellStatus]
+
+
+def _is_ignored_dir(path: Path) -> bool:
+    return path.name == "__pycache__" or path.name.startswith(".")
+
+
+def validate_cell_name(cell: str) -> str | None:
+    if not VALID_CELL_NAME_RE.fullmatch(cell):
+        return (
+            f"ERROR: Invalid cell name {cell!r}. "
+            "Use only letters, digits, underscores, and hyphens (starting with alphanumeric)."
+        )
+    return None
+
+
+def _safe_cell_dir(cell: str) -> Path:
+    dist_root = Path("dist").resolve()
+    cell_dir = (dist_root / cell).resolve()
+    if cell_dir.parent != dist_root:
+        raise ValueError(f"Refusing to access path outside dist/: {cell!r}")
+    return Path("dist") / cell
+
+
+def _load_json_dict(path: Path) -> dict[str, object] | None:
+    try:
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    result: dict[str, object] = {}
+    for key, value in cast(dict[object, object], raw).items():
+        if isinstance(key, str):
+            result[key] = value
+    return result
+
+
+def _as_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in cast(list[object], value) if isinstance(item, str)]
+
 
 FORBIDDEN_NON_ENTRYPOINT_PATTERNS = [
     (
@@ -81,27 +145,31 @@ def resolve_ts_module_path(source_file: Path, specifier: str, repo_root: Path) -
         base_cand = (source_file.parent / specifier).resolve()
     else:
         normalized = re.sub(r"^(?:@/|~/)+", "", specifier)
-        if not (normalized.startswith("contracts/") or normalized.startswith("dist/")):
+        if not normalized.startswith(("contracts/", "dist/")):
             return None
         base_cand = (repo_root / normalized).resolve()
 
     candidates: list[Path] = [base_cand]
     if base_cand.suffix in {".js", ".mjs", ".cjs"}:
         stem_path = base_cand.with_suffix("")
-        candidates.extend([
-            stem_path.with_suffix(".ts"),
-            stem_path.with_suffix(".tsx"),
-            stem_path.with_suffix(".d.ts"),
-        ])
+        candidates.extend(
+            [
+                stem_path.with_suffix(".ts"),
+                stem_path.with_suffix(".tsx"),
+                stem_path.with_suffix(".d.ts"),
+            ]
+        )
     elif not base_cand.suffix:
-        candidates.extend([
-            base_cand.with_suffix(".ts"),
-            base_cand.with_suffix(".tsx"),
-            base_cand.with_suffix(".d.ts"),
-            base_cand.with_suffix(".js"),
-            base_cand / "index.ts",
-            base_cand / "index.d.ts",
-        ])
+        candidates.extend(
+            [
+                base_cand.with_suffix(".ts"),
+                base_cand.with_suffix(".tsx"),
+                base_cand.with_suffix(".d.ts"),
+                base_cand.with_suffix(".js"),
+                base_cand / "index.ts",
+                base_cand / "index.d.ts",
+            ]
+        )
 
     for cand in candidates:
         if cand.is_file():
@@ -112,7 +180,9 @@ def resolve_ts_module_path(source_file: Path, specifier: str, repo_root: Path) -
     return None
 
 
-def extract_python_imports(source_file: Path, repo_root: Path, prefix: str = "contracts") -> list[Path]:
+def extract_python_imports(
+    source_file: Path, repo_root: Path, prefix: str = "contracts"
+) -> list[Path]:
     try:
         tree = ast.parse(source_file.read_text(encoding="utf-8"))
     except SyntaxError:
@@ -193,12 +263,16 @@ def sha256_manifest(paths: list[Path]) -> str:
 
 
 def collect_direct_upstream(cell: str) -> list[Path]:
+    token_re = re.compile(rf"(?<![a-zA-Z0-9]){re.escape(cell)}(?![a-zA-Z0-9])")
     matched: list[Path] = []
     for root in (Path("contracts"), Path("specs"), Path("tests")):
         if root.exists():
             matched.extend(
-                p for p in root.rglob("*")
-                if p.is_file() and "__pycache__" not in p.parts and (cell in p.name or cell in p.parts)
+                p
+                for p in root.rglob("*")
+                if p.is_file()
+                and "__pycache__" not in p.parts
+                and (cell in p.parts or token_re.search(p.name) is not None)
             )
     return sorted(set(matched))
 
@@ -213,7 +287,11 @@ def collect_upstream(cell: str, extra_seed_files: list[Path] | None = None) -> l
 def collect_dist_code(cell_dir: Path) -> list[Path]:
     if not cell_dir.exists():
         return []
-    return sorted(p for p in cell_dir.rglob("*") if p.is_file() and p.suffix in CODE_EXTS)
+    return sorted(
+        p
+        for p in cell_dir.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix in CODE_EXTS
+    )
 
 
 def set_writable(cell_dir: Path, writable: bool) -> None:
@@ -221,8 +299,10 @@ def set_writable(cell_dir: Path, writable: bool) -> None:
         return
     for p in cell_dir.rglob("*"):
         if p.is_file():
-            mode = (stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH) if writable else (
-                stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+            mode = (
+                (stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+                if writable
+                else (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
             )
             os.chmod(p, mode)
 
@@ -232,7 +312,7 @@ def discover_all_cells() -> list[str]:
     dist_root = Path("dist")
     if dist_root.exists():
         for p in dist_root.iterdir():
-            if p.is_dir() and not p.name.startswith("."):
+            if p.is_dir() and not _is_ignored_dir(p):
                 cells.add(p.name)
 
     specs_root = Path("specs")
@@ -240,13 +320,13 @@ def discover_all_cells() -> list[str]:
         for p in specs_root.glob("*.spec.md"):
             cells.add(p.name[: -len(".spec.md")])
         for p in specs_root.iterdir():
-            if p.is_dir() and not p.name.startswith("."):
+            if p.is_dir() and not _is_ignored_dir(p):
                 cells.add(p.name)
 
     contracts_root = Path("contracts")
     if contracts_root.exists():
         for p in contracts_root.iterdir():
-            if p.is_dir() and p.name != "migrations" and not p.name.startswith("."):
+            if p.is_dir() and p.name != "migrations" and not _is_ignored_dir(p):
                 cells.add(p.name)
             elif p.is_file() and p.suffix in CODE_EXTS:
                 stem = p.stem
@@ -260,12 +340,11 @@ def discover_all_cells() -> list[str]:
 def infer_cell_type(cell: str) -> str:
     lock_path = Path("dist") / cell / ".spec-lock.json"
     if lock_path.exists():
-        try:
-            data = json.loads(lock_path.read_text(encoding="utf-8"))
-            if data.get("cell_type") in CELL_BUDGETS:
-                return str(data["cell_type"])
-        except Exception:
-            pass
+        data = _load_json_dict(lock_path)
+        if data is not None:
+            raw_type = data.get("cell_type")
+            if isinstance(raw_type, str) and raw_type in CELL_BUDGETS:
+                return raw_type
     if cell == "main":
         return "entrypoint"
     spec_path = Path("specs") / f"{cell}.spec.md"
@@ -292,6 +371,103 @@ def map_contract_owner(contract_path: Path, all_cells: list[str]) -> str | None:
     return None
 
 
+def _extract_python_dist_deps(source_file: Path, cell: str) -> tuple[set[str], bool]:
+    try:
+        tree = ast.parse(source_file.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set(), False
+
+    deps: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if len(parts) >= 2 and parts[0] == "dist" and parts[1] != cell:
+                    deps.add(parts[1])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > 0:
+                parent = source_file.parent
+                for _ in range(node.level - 1):
+                    parent = parent.parent
+                rel_base = parent / Path(*node.module.split(".")) if node.module else parent
+                parts = rel_base.parts
+                if "dist" in parts:
+                    dist_idx = parts.index("dist")
+                    if dist_idx + 1 < len(parts):
+                        target = parts[dist_idx + 1]
+                        if target != cell:
+                            deps.add(target)
+                    else:
+                        for alias in node.names:
+                            if alias.name not in {cell, "*"}:
+                                deps.add(alias.name)
+            elif node.module == "dist":
+                for alias in node.names:
+                    if alias.name not in {cell, "*"}:
+                        deps.add(alias.name)
+            elif node.module and node.module.startswith("dist."):
+                target = node.module.split(".")[1]
+                if target != cell:
+                    deps.add(target)
+    return deps, True
+
+
+def _audit_python_non_entrypoint(source_file: Path, cell: str, cell_type: str) -> list[str]:
+    errors: list[str] = []
+    try:
+        tree = ast.parse(source_file.read_text(encoding="utf-8"))
+    except SyntaxError as exc:
+        return [f"{source_file.as_posix()}: Python syntax error: {exc.msg}"]
+
+    deps, _ = _extract_python_dist_deps(source_file, cell)
+    for imported_cell in sorted(deps):
+        errors.append(
+            f"{source_file.as_posix()}: Cross-cell Python import 'dist.{imported_cell}' "
+            f"forbidden in {cell_type} cell. Wire cells inside dist/main (--entrypoint)."
+        )
+
+    has_env_read = False
+    has_duckdb_path = False
+    has_sqlite_path = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+            and node.attr in {"environ", "getenv"}
+        ) or (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "os"
+            and any(alias.name in {"environ", "getenv"} for alias in node.names)
+        ):
+            has_env_read = True
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr == "connect"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value
+            and not node.args[0].value.startswith(":")
+        ):
+            if node.func.value.id == "duckdb":
+                has_duckdb_path = True
+            elif node.func.value.id == "sqlite3":
+                has_sqlite_path = True
+
+    if has_env_read:
+        errors.append(
+            f"{source_file.as_posix()}: Direct environment read outside dist/main (--entrypoint)"
+        )
+    if has_duckdb_path:
+        errors.append(f"{source_file.as_posix()}: Hardcoded DuckDB path (inject connection handle)")
+    if has_sqlite_path:
+        errors.append(f"{source_file.as_posix()}: Hardcoded SQLite path (inject connection handle)")
+    return errors
+
+
 def build_cell_dag(all_cells: list[str]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     repo_root = Path.cwd().resolve()
     forward: dict[str, set[str]] = {c: set() for c in all_cells}
@@ -310,14 +486,14 @@ def build_cell_dag(all_cells: list[str]) -> tuple[dict[str, set[str]], dict[str,
                     reverse_deps[cell].add(owner)
 
         for df in dist_files:
-            text = df.read_text(encoding="utf-8")
             if df.suffix == ".py":
-                for m in re.finditer(r"\bfrom\s+dist\.([a-zA-Z0-9_]+)\b|\bimport\s+dist\.([a-zA-Z0-9_]+)\b", text):
-                    target = m.group(1) or m.group(2)
-                    if target in all_cells and target != cell:
+                targets, _ = _extract_python_dist_deps(df, cell)
+                for target in targets:
+                    if target in all_cells:
                         forward[target].add(cell)
                         reverse_deps[cell].add(target)
             elif df.suffix in TS_EXTS:
+                text = df.read_text(encoding="utf-8")
                 for spec in extract_ts_specifiers(text):
                     resolved = resolve_ts_module_path(df, spec, repo_root)
                     if resolved and len(resolved.parts) >= 2 and resolved.parts[0] == "dist":
@@ -336,7 +512,9 @@ def build_cell_dag(all_cells: list[str]) -> tuple[dict[str, set[str]], dict[str,
     return forward, reverse_deps
 
 
-def topological_sort_cells(cells_subset: set[str], forward: dict[str, set[str]]) -> tuple[list[str], list[str]]:
+def topological_sort_cells(
+    cells_subset: set[str], forward: dict[str, set[str]]
+) -> tuple[list[str], list[str]]:
     in_degree: dict[str, int] = {c: 0 for c in cells_subset}
     for u in cells_subset:
         for v in forward.get(u, set()):
@@ -360,11 +538,11 @@ def topological_sort_cells(cells_subset: set[str], forward: dict[str, set[str]])
     return ordered, cycles
 
 
-def inspect_staleness() -> dict[str, object]:
+def inspect_staleness() -> StalenessReport:
     all_cells = discover_all_cells()
     forward, reverse_deps = build_cell_dag(all_cells)
 
-    cell_status: dict[str, dict[str, object]] = {}
+    cell_status: dict[str, CellStatus] = {}
     stale_cells: set[str] = set()
 
     for cell in all_cells:
@@ -382,30 +560,33 @@ def inspect_staleness() -> dict[str, object]:
         if not lock_path.exists() or not dist_files:
             reasons.append("UNSEALED")
         else:
-            try:
-                lock = json.loads(lock_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+            lock = _load_json_dict(lock_path)
+            if lock is None:
                 reasons.append("CORRUPT_LOCKFILE")
-                lock = {}
-
-            if lock:
+            else:
                 if current_dist_sha != lock.get("dist_sha256"):
                     reasons.append("DIST_TAMPERED")
                 if current_up_sha != lock.get("upstream_sha256"):
                     reasons.append("UPSTREAM_CHANGED")
-                    old_files = set(lock.get("upstream_files", []))
+                    old_files = set(_as_str_list(lock.get("upstream_files")))
                     cur_files = {p.as_posix() for p in upstream}
                     added_or_removed = sorted(old_files ^ cur_files)
                     if added_or_removed:
                         changed_drivers.extend(added_or_removed)
                     else:
-                        changed_drivers.extend(p.as_posix() for p in upstream if p.parts and p.parts[0] == "contracts")
+                        changed_drivers.extend(
+                            p.as_posix() for p in upstream if p.parts and p.parts[0] == "contracts"
+                        )
 
         is_stale = len(reasons) > 0
         if is_stale:
             stale_cells.add(cell)
 
-        seal_flag = " --entrypoint" if c_type == "entrypoint" else (" --adapter" if c_type == "adapter" else "")
+        seal_flag = (
+            " --entrypoint"
+            if c_type == "entrypoint"
+            else (" --adapter" if c_type == "adapter" else "")
+        )
         cell_status[cell] = {
             "cell": cell,
             "cell_type": c_type,
@@ -427,9 +608,7 @@ def inspect_staleness() -> dict[str, object]:
         for down in forward.get(curr, set()):
             if down not in stale_cells:
                 stale_cells.add(down)
-                reasons_list = cell_status[down]["reasons"]  # type: ignore[index]
-                assert isinstance(reasons_list, list)
-                reasons_list.append(f"UPSTREAM_CELL_STALE({curr})")
+                cell_status[down]["reasons"].append(f"UPSTREAM_CELL_STALE({curr})")
                 cell_status[down]["stale"] = True
                 queue.append(down)
 
@@ -446,44 +625,52 @@ def inspect_staleness() -> dict[str, object]:
     }
 
 
-def cmd_stale(as_json: bool, names_only: bool) -> int:
+def cmd_stale(as_json: bool, names_only: bool, fail_on_stale: bool = False) -> int:
     report = inspect_staleness()
+    exit_code = 1 if (report["has_cycles"] or (fail_on_stale and report["stale_count"] > 0)) else 0
     if as_json:
         print(json.dumps(report, indent=2))
-        return 1 if report["has_cycles"] else 0
+        return exit_code
 
     if report["has_cycles"]:
         print(
-            f"[DAG_CYCLE_ERROR] Circular dependency detected among cells: {', '.join(report['cycle_cells'])}",  # type: ignore[arg-type]
+            f"[DAG_CYCLE_ERROR] Circular dependency detected among cells: "
+            f"{', '.join(report['cycle_cells'])}",
             file=sys.stderr,
         )
         return 1
 
-    order: list[str] = report["regeneration_order"]  # type: ignore[assignment]
+    order = report["regeneration_order"]
     if names_only:
         if order:
             print(" ".join(order))
-        return 0
+        return exit_code
 
     if not order:
-        print("OK: 0 stale cells. All committed dist/ artifacts are synchronized with upstream contracts, specs, and tests.")
+        print(
+            "OK: 0 stale cells. All committed dist/ artifacts are synchronized with upstream "
+            "contracts, specs, and tests."
+        )
         return 0
 
-    print(f"STALE CELLS DETECTED ({len(order)} cell(s) require regeneration in topological order):\n")
-    print(f"{'Step':<6} {'Cell':<22} {'Type':<12} {'Staleness Trigger':<32} {'Upstream Dependencies'}")
+    print(
+        f"STALE CELLS DETECTED ({len(order)} cell(s) require regeneration in topological order):\n"
+    )
+    print(
+        f"{'Step':<6} {'Cell':<22} {'Type':<12} {'Staleness Trigger':<32} {'Upstream Dependencies'}"
+    )
     print("-" * 96)
-    cells_list: list[dict[str, object]] = report["cells"]  # type: ignore[assignment]
-    for idx, item in enumerate(cells_list, start=1):
-        reasons_str = ", ".join(item["reasons"])  # type: ignore[arg-type]
-        deps_str = ", ".join(item["depends_on"]) or "(root)"  # type: ignore[arg-type]
-        print(f"{idx:<6} {str(item['cell']):<22} {str(item['cell_type']):<12} {reasons_str:<32} {deps_str}")
+    for idx, item in enumerate(report["cells"], start=1):
+        reasons_str = ", ".join(item["reasons"])
+        deps_str = ", ".join(item["depends_on"]) or "(root)"
+        print(f"{idx:<6} {item['cell']:<22} {item['cell_type']:<12} {reasons_str:<32} {deps_str}")
 
     print("\nRecommended Topological Regeneration Sequence:")
-    for idx, item in enumerate(cells_list, start=1):
-        cmds: list[str] = item["commands"]  # type: ignore[assignment]
+    for idx, item in enumerate(report["cells"], start=1):
+        cmds = item["commands"]
         print(f"  # Step {idx}: {item['cell']} ({item['cell_type']})")
         print(f"  {cmds[0]} && {cmds[2]}")
-    return 0
+    return exit_code
 
 
 def audit_cell(
@@ -499,56 +686,60 @@ def audit_cell(
         text = f.read_text(encoding="utf-8")
         chars += len(text)
         loc += sum(
-            1 for ln in text.splitlines()
+            1
+            for ln in text.splitlines()
             if ln.strip() and not ln.strip().startswith(("#", "//", "/*", "*"))
         )
         if cell_type != "entrypoint":
-            for regex, reason in FORBIDDEN_NON_ENTRYPOINT_PATTERNS:
-                if regex.search(text):
-                    errors.append(f"{f.as_posix()}: {reason}")
-
-            for m in re.finditer(r"\bfrom\s+dist\.([a-zA-Z0-9_]+)\b|\bimport\s+dist\.([a-zA-Z0-9_]+)\b", text):
-                imported_cell = m.group(1) or m.group(2)
-                if imported_cell != cell:
-                    errors.append(
-                        f"{f.as_posix()}: Cross-cell Python import 'dist.{imported_cell}' forbidden in {cell_type} cell. "
-                        f"Wire cells inside dist/main (--entrypoint)."
-                    )
-
-            if f.suffix in TS_EXTS:
+            if f.suffix == ".py":
+                errors.extend(_audit_python_non_entrypoint(f, cell, cell_type))
+            elif f.suffix in TS_EXTS:
+                for regex, reason in FORBIDDEN_NON_ENTRYPOINT_PATTERNS:
+                    if regex.search(text):
+                        errors.append(f"{f.as_posix()}: {reason}")
                 for spec in extract_ts_specifiers(text):
                     resolved = resolve_ts_module_path(f, spec, repo_root)
                     if resolved and len(resolved.parts) >= 2 and resolved.parts[0] == "dist":
                         target_cell = resolved.parts[1]
                         if target_cell != cell:
                             errors.append(
-                                f"{f.as_posix()}: Cross-cell TS import '{spec}' (-> dist/{target_cell}) forbidden in {cell_type} cell. "
-                                f"Wire cells inside dist/main (--entrypoint)."
+                                f"{f.as_posix()}: Cross-cell TS import '{spec}' "
+                                f"(-> dist/{target_cell}) forbidden in {cell_type} cell. "
+                                "Wire cells inside dist/main (--entrypoint)."
                             )
 
     if cell_type == "domain":
         test_files = [p for p in upstream_files if "tests" in p.parts]
-        has_prop_test = any(PROPERTY_TEST_MARKERS.search(p.read_text(encoding="utf-8")) for p in test_files)
+        has_prop_test = any(
+            PROPERTY_TEST_MARKERS.search(p.read_text(encoding="utf-8")) for p in test_files
+        )
         if not has_prop_test:
             errors.append(
-                f"Domain cell '{cell}' lacks property-based fuzzing markers (@given or fc.assert/fc.property) in tests/."
+                f"Domain cell '{cell}' lacks property-based fuzzing markers "
+                "(@given or fc.assert/fc.property) in tests/."
             )
 
     tokens = chars // 4
     if loc > budget["max_loc"]:
         errors.append(f"LOC ceiling breached: {loc} LOC (max {budget['max_loc']} for {cell_type}).")
     if tokens > budget["max_tokens"]:
-        errors.append(f"Token budget breached: ~{tokens} tokens (max {budget['max_tokens']} for {cell_type}).")
+        errors.append(
+            f"Token budget breached: ~{tokens} tokens (max {budget['max_tokens']} for {cell_type})."
+        )
     return loc, tokens, errors
 
 
 def cmd_prepare(cell: str) -> int:
+    if err := validate_cell_name(cell):
+        print(err, file=sys.stderr)
+        return 1
+
     upstream = collect_upstream(cell)
     if not upstream:
         print(f"ERROR: No upstream contracts/specs/tests found for cell '{cell}'.", file=sys.stderr)
         return 1
 
-    cell_dir = Path("dist") / cell
+    cell_dir = _safe_cell_dir(cell)
     set_writable(cell_dir, True)
     if cell_dir.exists():
         shutil.rmtree(cell_dir)
@@ -558,7 +749,10 @@ def cmd_prepare(cell: str) -> int:
     scratch_dir.mkdir(exist_ok=True)
     sections: list[str] = [
         f"# Hermetic Synthesis Context: `{cell}`\n",
-        "Synthesize `dist/" + cell + "/` in a single pass to satisfy these exact contracts, specs, and tests.\n",
+        (
+            f"Synthesize `dist/{cell}/` in a single pass to satisfy these exact contracts, "
+            "specs, and tests.\n"
+        ),
         "Do NOT modify any file in `contracts/`, `specs/`, or `tests/`.\n",
     ]
     total_chars = 0
@@ -583,21 +777,25 @@ def cmd_prepare(cell: str) -> int:
     freeze_path = scratch_dir / f".freeze_{cell}.json"
     freeze_payload = {
         "cell": cell,
-        "prepared_at_utc": datetime.now(timezone.utc).isoformat(),
+        "prepared_at_utc": datetime.now(UTC).isoformat(),
         "inbound_tokens": est_inbound_tokens,
         "upstream_sha256": sha256_manifest(upstream),
         "upstream_files": [p.as_posix() for p in upstream],
     }
     freeze_path.write_text(json.dumps(freeze_payload, indent=2) + "\n", encoding="utf-8")
     print(
-        f"[PREPARED & FROZEN] Wiped dist/{cell}/ | Bundled {len(upstream)} transitive files (~{est_inbound_tokens} tokens) "
-        f"into {context_path.as_posix()}"
+        f"[PREPARED & FROZEN] Wiped dist/{cell}/ | Bundled {len(upstream)} transitive files "
+        f"(~{est_inbound_tokens} tokens) into {context_path.as_posix()}"
     )
     return 0
 
 
 def cmd_unlock(cell: str) -> int:
-    cell_dir = Path("dist") / cell
+    if err := validate_cell_name(cell):
+        print(err, file=sys.stderr)
+        return 1
+
+    cell_dir = _safe_cell_dir(cell)
     set_writable(cell_dir, True)
     if cell_dir.exists():
         shutil.rmtree(cell_dir)
@@ -610,12 +808,17 @@ def cmd_unlock(cell: str) -> int:
 
 
 def cmd_seal(cell: str, cell_type: str) -> int:
-    cell_dir = Path("dist") / cell
+    if err := validate_cell_name(cell):
+        print(err, file=sys.stderr)
+        return 1
+
+    cell_dir = _safe_cell_dir(cell)
     dist_files = collect_dist_code(cell_dir)
     if not dist_files:
         print(f"ERROR: No implementation files found in dist/{cell}/", file=sys.stderr)
         return 1
 
+    base_upstream = collect_upstream(cell)
     upstream = collect_upstream(cell, extra_seed_files=dist_files)
     if not upstream:
         print(f"ERROR: No upstream contracts/specs/tests found for '{cell}'.", file=sys.stderr)
@@ -624,12 +827,15 @@ def cmd_seal(cell: str, cell_type: str) -> int:
     current_upstream_sha = sha256_manifest(upstream)
     freeze_path = Path("scratch") / f".freeze_{cell}.json"
     if freeze_path.exists():
-        freeze_data = json.loads(freeze_path.read_text(encoding="utf-8"))
-        frozen_files = [Path(p) for p in freeze_data.get("upstream_files", []) if Path(p).exists()]
-        if sha256_manifest(frozen_files) != freeze_data.get("upstream_sha256"):
+        freeze_data = _load_json_dict(freeze_path)
+        if freeze_data is None or sha256_manifest(base_upstream) != freeze_data.get(
+            "upstream_sha256"
+        ):
             print(
-                f"[TEST/SPEC TAMPER DETECTED] Upstream files for '{cell}' were modified after 'prepare'.\n"
-                f"Weakening tests or mutating contracts mid-synthesis is forbidden. Re-run 'prepare {cell}'.",
+                f"[TEST/SPEC TAMPER DETECTED] Upstream files for '{cell}' were modified after "
+                "'prepare'.\n"
+                "Weakening tests or mutating contracts mid-synthesis is forbidden. "
+                f"Re-run 'prepare {cell}'.",
                 file=sys.stderr,
             )
             return 1
@@ -645,7 +851,7 @@ def cmd_seal(cell: str, cell_type: str) -> int:
     payload = {
         "cell": cell,
         "cell_type": cell_type,
-        "sealed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "sealed_at_utc": datetime.now(UTC).isoformat(),
         "metrics": {"loc": loc, "estimated_tokens": tokens},
         "upstream_files": [p.as_posix() for p in upstream],
         "upstream_sha256": current_upstream_sha,
@@ -661,32 +867,48 @@ def cmd_seal(cell: str, cell_type: str) -> int:
 
 
 def cmd_verify() -> int:
-    dist_root = Path("dist")
-    if not dist_root.exists():
+    all_cells = discover_all_cells()
+    if not all_cells:
         return 0
 
     failures: list[str] = []
-    for cell_dir in sorted(p for p in dist_root.iterdir() if p.is_dir()):
-        cell = cell_dir.name
+    for cell in all_cells:
+        cell_dir = Path("dist") / cell
         lock_path = cell_dir / ".spec-lock.json"
         if not lock_path.exists():
             failures.append(f"[{cell}] Missing dist/{cell}/.spec-lock.json.")
             continue
 
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
-        cell_type = lock.get("cell_type", "domain")
+        lock = _load_json_dict(lock_path)
+        if lock is None:
+            failures.append(f"[{cell}] Corrupt lockfile dist/{cell}/.spec-lock.json.")
+            continue
+
+        raw_type = lock.get("cell_type", "domain")
+        if not isinstance(raw_type, str) or raw_type not in CELL_BUDGETS:
+            failures.append(f"[{cell}] Invalid cell_type {raw_type!r} in .spec-lock.json.")
+            continue
+        cell_type = raw_type
+
         dist_files = collect_dist_code(cell_dir)
+        if not dist_files:
+            failures.append(f"[{cell}] Missing implementation files in dist/{cell}/.")
+            continue
+
         upstream = collect_upstream(cell, extra_seed_files=dist_files)
 
         _, _, audit_errors = audit_cell(cell, dist_files, upstream, cell_type)
         failures.extend(f"[{cell}] {e}" for e in audit_errors)
 
         if sha256_manifest(dist_files) != lock.get("dist_sha256"):
-            failures.append(f"[{cell}] TAMPER DETECTED in dist/{cell}/. Direct patching is prohibited.")
+            failures.append(
+                f"[{cell}] TAMPER DETECTED in dist/{cell}/. Direct patching is prohibited."
+            )
         if sha256_manifest(upstream) != lock.get("upstream_sha256"):
             failures.append(
-                f"[{cell}] STALE ARTIFACT: Upstream contracts/specs/tests changed without regenerating dist/{cell}/. "
-                f"Run 'python3 scripts/regen_guard.py stale' for rebuild order."
+                f"[{cell}] STALE ARTIFACT: Upstream contracts/specs/tests changed without "
+                f"regenerating dist/{cell}/. Run 'python3 scripts/regen_guard.py stale' for "
+                "rebuild order."
             )
 
     if failures:
@@ -700,13 +922,28 @@ def cmd_verify() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Spec-First Provenance Lock & Hermetic Context Packer")
+    parser = argparse.ArgumentParser(
+        description="Spec-First Provenance Lock & Hermetic Context Packer"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_stale = sub.add_parser("stale", help="Detect stale/unsealed cells and output topological regeneration order")
+    p_stale = sub.add_parser(
+        "stale", help="Detect stale/unsealed cells and output topological regeneration order"
+    )
     stale_group = p_stale.add_mutually_exclusive_group()
-    stale_group.add_argument("--json", action="store_true", help="Emit machine-readable JSON staleness report")
-    stale_group.add_argument("--names-only", action="store_true", help="Print space-separated cell names in topological order")
+    stale_group.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON staleness report"
+    )
+    stale_group.add_argument(
+        "--names-only",
+        action="store_true",
+        help="Print space-separated cell names in topological order",
+    )
+    p_stale.add_argument(
+        "--fail-on-stale",
+        action="store_true",
+        help="Exit non-zero if any stale or unsealed cells are detected",
+    )
 
     p_prep = sub.add_parser("prepare")
     p_prep.add_argument("cell")
@@ -717,14 +954,18 @@ def main() -> int:
     p_se = sub.add_parser("seal")
     p_se.add_argument("cell")
     group = p_se.add_mutually_exclusive_group()
-    group.add_argument("--adapter", action="store_true", help="150 LOC / 2000 token I/O adapter cell")
-    group.add_argument("--entrypoint", action="store_true", help="200 LOC / 2500 token Composition Root cell")
+    group.add_argument(
+        "--adapter", action="store_true", help="150 LOC / 2000 token I/O adapter cell"
+    )
+    group.add_argument(
+        "--entrypoint", action="store_true", help="200 LOC / 2500 token Composition Root cell"
+    )
 
     sub.add_parser("verify")
 
     args = parser.parse_args()
     if args.cmd == "stale":
-        return cmd_stale(args.json, args.names_only)
+        return cmd_stale(args.json, args.names_only, args.fail_on_stale)
     if args.cmd == "prepare":
         return cmd_prepare(args.cell)
     if args.cmd == "unlock":
