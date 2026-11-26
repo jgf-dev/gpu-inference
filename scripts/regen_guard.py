@@ -5,11 +5,11 @@ Staleness Detector & Provenance Gatekeeper.
 Supports both Python (AST) and TypeScript/ESM transitive contract dependency resolution.
 
 Usage:
-  python3 scripts/regen_guard.py stale [--json | --names-only]       # Detect stale/unsealed cells & print topological rebuild order
-  python3 scripts/regen_guard.py prepare <cell>                      # Wipe dist/<cell>, freeze upstream hash, emit scratch/context_<cell>.md
-  python3 scripts/regen_guard.py unlock <cell>                       # Wipe dist/<cell> & clear freeze lock
-  python3 scripts/regen_guard.py seal <cell> [--adapter|--entrypoint]# Verify test-freeze, audit LOC/AST, write .spec-lock.json, chmod 0444
-  python3 scripts/regen_guard.py verify                              # Pre-commit & CI provenance check across all cells
+  python3 scripts/regen_guard.py stale [--json | --names-only] [--fail-on-stale]  # Detect stale/unsealed cells & topological rebuild order
+  python3 scripts/regen_guard.py prepare <cell>                                   # Wipe dist/<cell>, freeze upstream hash, emit scratch/context_<cell>.md
+  python3 scripts/regen_guard.py unlock <cell>                                    # Wipe dist/<cell> & clear freeze lock
+  python3 scripts/regen_guard.py seal <cell> [--adapter|--entrypoint]             # Verify test-freeze, audit LOC/AST, write .spec-lock.json, chmod 0444
+  python3 scripts/regen_guard.py verify                                           # Pre-commit & CI provenance check across all cells
 """
 
 from __future__ import annotations
