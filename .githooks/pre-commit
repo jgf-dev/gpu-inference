@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# __pycache__ inside dist/ or contracts/ is not a cell and breaks verify.
-find dist contracts -type d -name __pycache__ -prune -exec rm -rf {} +
-
-python3 scripts/regen_guard.py verify
+uv run ruff check .
+uv run ruff format --check .
+uv run python scripts/regen_guard.py verify
+uv run python scripts/regen_guard.py stale --fail-on-stale
 
 if git diff --cached --name-only | grep -qE '^scratch/'; then
   echo "ERROR: Attempted to commit files in scratch/. Extract findings to specs/ and delete scratch/ files." >&2
