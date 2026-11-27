@@ -31,14 +31,23 @@ gcs_mount = modal.CloudBucketMount(
 
 outputs = modal.Volume.from_name("comfyui-outputs", create_if_missing=True)
 
+runtime_env = {
+    "GCS_BUCKET": bucket,
+    "COMFYUI_PORT": str(plan.port),
+    "COMFYUI_OUTPUT_DIR": str(plan.settings.output_dir),
+    "COMFYUI_HOME": str(plan.settings.comfyui_home),
+    "MODELS_MOUNT": str(plan.settings.models_mount),
+    "EXTRA_MODEL_PATHS_CONFIG": str(plan.settings.extra_model_paths),
+}
+
 
 @app.function(
     image=image,
     gpu=plan.settings.modal_gpu,
-    env={"GCS_BUCKET": bucket},
+    env=runtime_env,
     volumes={
         str(plan.settings.models_mount): gcs_mount,
-        "/outputs": outputs,
+        str(plan.settings.output_dir): outputs,
     },
     min_containers=0,
     max_containers=1,
@@ -46,7 +55,7 @@ outputs = modal.Volume.from_name("comfyui-outputs", create_if_missing=True)
     timeout=86_400,
 )
 @modal.concurrent(max_inputs=100)
-@modal.web_server(8188, startup_timeout=600, requires_proxy_auth=False)
+@modal.web_server(plan.port, startup_timeout=600, requires_proxy_auth=False)
 def ui() -> None:
     subprocess.Popen(
         [sys.executable, "-m", "dist.main"],
