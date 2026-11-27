@@ -38,7 +38,7 @@ def test_modal_mounts_gcs_read_only_and_scales_to_zero():
     assert isinstance(read_only, ast.Constant)
     assert read_only.value is True
 
-    assert EXPECTED_RUNTIME_ENV_KEYS <= _assigned_dict_keys(tree, "runtime_env")
+    assert _assigned_dict_keys(tree, "runtime_env") >= EXPECTED_RUNTIME_ENV_KEYS
 
     functions = calls(tree, "function")
     assert len(functions) == 1
@@ -90,7 +90,7 @@ def test_beam_mounts_gcs_as_s3_compatible_and_forwards_plan():
     assert mount_path is not None
     assert ast.unparse(mount_path) == "str(plan.settings.output_dir)"
 
-    assert EXPECTED_RUNTIME_ENV_KEYS <= _assigned_dict_keys(tree, "runtime_env")
+    assert _assigned_dict_keys(tree, "runtime_env") >= EXPECTED_RUNTIME_ENV_KEYS
 
     pods = calls(tree, "Pod")
     assert len(pods) == 1

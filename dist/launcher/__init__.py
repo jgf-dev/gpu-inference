@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import NoReturn
 
 from contracts.argv_contract import LaunchPlan
 from contracts.launcher_contract import ChdirFn, ExecFn
@@ -14,6 +15,6 @@ def launch(
     *,
     exec_fn: ExecFn = os.execvp,
     chdir_fn: ChdirFn = os.chdir,
-) -> None:
+) -> NoReturn:
     chdir_fn(str(plan.cwd))
     exec_fn(sys.executable, [sys.executable, "main.py", *plan.argv])

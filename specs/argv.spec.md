@@ -28,7 +28,7 @@
 | :--- | :--- | :--- |
 | `port=None` | Use `settings.port` | argv |
 | `output_dir=None` | Use `settings.output_dir` | argv |
-| `port` outside 1..65535 | `Settings` validation rejects first | `ValidationError` |
+| `port` override outside 1..65535 | Reject before rendering argv | `ValueError` |
 | `Path` output | Stringify with `str()` | argv |
 
 ## 5. Performance & Complexity Ceilings
