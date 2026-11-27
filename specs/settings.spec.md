@@ -20,14 +20,17 @@
 1. Same mapping produces equal `Settings`.
 2. The input mapping is never mutated.
 3. No `os.environ`, `os.getenv`, file I/O, or network I/O.
-4. `gcs_bucket` never starts with `gs://`.
+4. `gcs_bucket` never starts with `gs://` (case-insensitive) and contains no `/`.
 5. `port` is 1..65535; `idle_timeout_seconds` is 1..1200.
+6. Empty string (`""`) environment values fall back to field defaults.
 
 ## 4. Edge-Case & Failure Resolution Matrix
 | Condition | Behavior | Emitted |
 | :--- | :--- | :--- |
 | Empty mapping | Apply defaults | `Settings()` |
-| `GCS_BUCKET=gs://x` | Reject at validation | `ValidationError` |
+| Empty string env var (e.g. `COMFYUI_HOME=""`) | Fall back to field default | `Settings()` |
+| `GCS_BUCKET=gs://x` or `GS://x` | Reject at validation | `ValidationError` |
+| `GCS_BUCKET=my-bucket/prefix` | Reject at validation | `ValidationError` |
 | `COMFYUI_PORT=abc` | Reject before model construction | `ValueError` |
 | `COMFYUI_PORT=0` | Reject at validation | `ValidationError` |
 | `require_bucket()` on empty | Reject | `ValueError` |

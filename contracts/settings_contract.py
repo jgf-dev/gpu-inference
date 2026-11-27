@@ -25,8 +25,10 @@ class Settings(BaseModel):
     @classmethod
     def _normalize_bucket(cls, value: str) -> str:
         value = value.strip()
-        if value.startswith("gs://"):
+        if value.lower().startswith("gs://"):
             raise ValueError("gcs_bucket must be the bucket name without gs://")
+        if "/" in value:
+            raise ValueError("gcs_bucket must be a bucket name without path separators")
         return value
 
     def require_bucket(self) -> str:

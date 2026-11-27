@@ -14,11 +14,15 @@ def build_argv(
     output_dir: str | Path | None = None,
 ) -> list[str]:
     """Return ComfyUI argv; --disable-mmap is mandatory for FUSE model stores."""
+    resolved_port = settings.port if port is None else port
+    if not 1 <= resolved_port <= 65535:
+        raise ValueError(f"port must be between 1 and 65535, got {resolved_port}")
+
     return [
         "--listen",
         "0.0.0.0",
         "--port",
-        str(settings.port if port is None else port),
+        str(resolved_port),
         "--disable-mmap",
         "--disable-auto-launch",
         "--extra-model-paths-config",

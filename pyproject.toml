@@ -21,10 +21,19 @@ pythonpath = ["."]
 addopts = "-q"
 
 [tool.pyright]
-include = ["contracts", "dist"]
+include = ["contracts", "dist", "scripts"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
 
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+exclude = [
+    ".git",
+    ".hypothesis",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "scratch",
+]

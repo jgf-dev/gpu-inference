@@ -12,9 +12,9 @@ def calls(tree: ast.Module, name: str) -> list[ast.Call]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id == name:
-            found.append(node)
-        elif isinstance(func, ast.Attribute) and func.attr == name:
+        if (isinstance(func, ast.Name) and func.id == name) or (
+            isinstance(func, ast.Attribute) and func.attr == name
+        ):
             found.append(node)
     return found
 
