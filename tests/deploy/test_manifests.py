@@ -110,4 +110,4 @@ def test_dockerfile_creates_non_root_user_and_writable_outputs():
     assert "mkdir -p /outputs /models" in dockerfile
     assert "chown -R 1000:1000 /app /opt/ComfyUI /outputs /home/comfy" in dockerfile
     assert "USER 1000:1000" in dockerfile
-    assert "pydantic>=2.11,<3" in dockerfile
+    assert "pydantic==2.14.3" in dockerfile

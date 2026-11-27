@@ -34,7 +34,7 @@ RUN git clone --depth 1 --branch "${COMFYUI_VERSION}" \
  && pip install -r /opt/ComfyUI/requirements.txt
 
 WORKDIR /app
-RUN pip install --no-cache-dir "pydantic>=2.11,<3"
+RUN pip install --no-cache-dir pydantic==2.14.3
 
 COPY contracts/ ./contracts/
 COPY dist/ ./dist/
